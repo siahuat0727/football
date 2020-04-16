@@ -91,6 +91,7 @@ class _QNet(nn.Module, ABC):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        return loss.item()
 
 
 class _DQNMixin:

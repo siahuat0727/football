@@ -1,25 +1,19 @@
-import gfootball.env as football_env
-
-import operator
-import functools
 import time
 import signal
 import pickle
 import argparse
+import operator
+import functools
 import os
 from os.path import join
-import random
 
 import torch
-from torch import nn
-from torch.utils.data import TensorDataset
-from torch.utils.data import DataLoader
 
-from model import DQN, DDQN, DuelingDQN, DuelingDDQN
+import gfootball.env as football_env
 from replay_pool import ReplayPool
 from average_meter import AverageMeter
+from model import DQN, DDQN, DuelingDQN, DuelingDDQN
 
-import pdb
 
 def np2flattensor(d):
     return torch.from_numpy(d).view(-1).float()
@@ -29,96 +23,125 @@ def avg(d):
     return sum(d)/len(d)
 
 
-
 def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch DQN Training',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
     # Experiment setting
     parser.add_argument('--arch', type=str, default='DQN',
                         help='decrease learning rate at these epochs')
     parser.add_argument('--cpu', action='store_true', help='no gpu')
+    parser.add_argument('--env', type=str, default='academy_empty_goal',
+                        help='no gpu')
 
     # Hyperparams
-    parser.add_argument('--update_freq', type=int, default=2500,
-                        help='decrease learning rate at these epochs')
-    parser.add_argument('--batch_size', type=int, default=512,
-                        help='decrease learning rate at these epochs')
-    parser.add_argument('--memory_size', type=int, default=1000000,
-                        help='decrease learning rate at these epochs')
-    parser.add_argument('--decay_step', type=int, default=3000000,
-                        help='decrease learning rate at these epochs')
+    parser.add_argument('--decay_step', type=int, default=30000, help='')
+    parser.add_argument('--batch_size', type=int, default=512, help='')
+    parser.add_argument('--hidden_size', type=int, default=256, help='')
+    parser.add_argument('--memory_size', type=int, default=100000, help='')
+    parser.add_argument('--update_freq', type=int, default=2500, help='')
+    parser.add_argument('--init_episode', type=int, default=100, help='')
+    parser.add_argument('--lr', type=float, default=0.0001, help='')
+    parser.add_argument('--gamma', type=float, default=0.999, help='')
+    parser.add_argument('--min_eps', type=float, default=0.02, help='')
 
     # Show
-    parser.add_argument('--min_show', type=int, default=100,
-                        help='decrease learning rate at these epochs')
+    parser.add_argument('--min_show', type=int, default=100, help='')
+    parser.add_argument('--test', action='store_true', help='')
 
     args = parser.parse_args()
 
-    args.dir = '{}_{}'.format(args.arch, int(time.time()))
+    # Checkpoint directory
+    args.dir = '{}_{}_{}'.format(args.arch, args.env, int(time.time()))
+    if args.test:
+        args.dir = join('/tmp', args.dir)
+
     args.gpu = not args.cpu
 
     return args
 
-def main():
-    args = parse_args()
-    os.makedirs(args.dir)
 
-    env = football_env.create_environment(env_name="academy_3_vs_1_with_keeper",
+def get_env(args):
+    env = football_env.create_environment(env_name=args.env,
                                           representation='simple115',
                                           number_of_left_players_agent_controls=1,
                                           stacked=False,
-                                          logdir=join('/tmp/football', args.dir),
+                                          logdir=join(
+                                              '/tmp/football', args.dir),
                                           write_goal_dumps=False,
                                           write_full_episode_dumps=False,
                                           render=False)
-
     n_s = functools.reduce(operator.mul, env.observation_space.shape, 1)
     n_a = env.action_space.n
+    return env, n_s, n_a
+
+
+def last_info(rewards, name, min_show):
+    if len(rewards) < min_show:
+        return ''
+    win = sum(r == 1 for r in rewards[-min_show:])
+    lose = sum(r == -1 for r in rewards[-min_show:])
+    return f', {name} last {min_show} win={win} lose={lose}'
+
+
+def main():
+    args = parse_args()
+    print(args)
+
+    os.makedirs(args.dir)
+
+    env, n_s, n_a = get_env(args)
 
     models = {
-            'DQN': DQN,
-            'DDQN': DDQN,
-            'DuelingDQN': DuelingDQN,
-            'DuelingDDQN': DuelingDDQN,
+        'DQN': DQN,
+        'DDQN': DDQN,
+        'DuelingDQN': DuelingDQN,
+        'DuelingDDQN': DuelingDDQN,
     }
-
-    model = models[args.arch]([n_s, 256, n_a])
+    model = models[args.arch]([n_s, args.hidden_size, n_a])
     if args.gpu:
         model = model.cuda()
-    optimizer = torch.optim.Adam(model.net.parameters(), lr=0.00001475)  # TODO
-
+    optimizer = torch.optim.Adam(model.net.parameters(), lr=args.lr)
 
     # Signal handling (soft terminate)
     keep_running = [True]
+
     def signal_handler(sig, frame):
         print("Last training...")
         keep_running[0] = False
-    signal_old = signal.signal(signal.SIGINT, signal_handler)
-
+    signal.signal(signal.SIGINT, signal_handler)
 
     episodes = int(3e9)
-    eps = 1.0
+    eps_ = 1.0
     steps = 0
 
-    rewards = []
+    explore_rewards = []
+    exploit_rewards = []
+
     pool = ReplayPool(args.memory_size)
 
     best_result, cur_result = 0, 0
 
     start = time.time()
     for episode in range(episodes):
-        if keep_running[0] == False:
+        if not keep_running[0]:
             break
 
-        done = False
-        s = env.reset()
+        if episode % 4 == 0 or episode < args.init_episode:
+            rewards = explore_rewards
+            eps_ = max(eps_ - (1/args.decay_step), args.min_eps)
+            eps = eps_
+        else:
+            rewards = exploit_rewards
+            eps = 0.0
 
+        s = env.reset()
         losses = AverageMeter()
-        loss = 0
+
+        done = False
         while not done:
-            eps = max(eps - (1/args.decay_step), 0.01)
             steps += 1
-            print('\r{}: {}'.format(episode, steps), end='')
+            print(f'\r{episode}: {steps}', end='')
 
             # a = env.action_space.sample()
             a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu)
@@ -131,54 +154,61 @@ def main():
 
             if len(pool) >= args.batch_size:
                 batch = pool.sample(args.batch_size, args.gpu)
-                loss = model.train(batch, optimizer, gamma=0.999)
+                loss = model.train(batch, optimizer, gamma=args.gamma)
                 losses.update(loss, args.batch_size)
 
             if steps % args.update_freq == 0:
-                end = time.time()
-                print('\nTime elapsed for {} steps: {:.2f} s'.format(args.update_freq, end-start))
-                print('10M step left {:.2f} hours'.format((end-start)*(1e7-steps)/args.update_freq/3600))
-                start = end
-
                 model.update_net_t()
 
+                end = time.time()
+                print('\nTime elapsed for {} steps: {:.2f} s'.format(
+                    args.update_freq, end-start))
+                print('10M step left {:.2f} hours'.format(
+                    (end-start)*(1e7-steps)/args.update_freq/3600))
+                start = end
 
         if done:
             rewards.append(int(r))
 
-        info = ', eps={:.2f}, loss={:.2e}, avg score {:.2f}'.format(eps, losses.avg, avg(rewards))
+        print_info(eps, losses, explore_rewards, exploit_rewards, args)
 
-        if len(rewards) > args.min_show:
-            win = sum(r==1 for r in rewards[-args.min_show:])
-            lose = sum(r==-1 for r in rewards[-args.min_show:])
-
-            info += ', last win {}/{}'.format(win, args.min_show)
-            info += ', last lose {}/{}'.format(lose, args.min_show)
-
-        print(info)
-
-
-        if len(rewards) >= args.min_show:
-            cur_result = avg(rewards[-args.min_show:])
+        if len(exploit_rewards) >= args.min_show:
+            cur_result = avg(exploit_rewards[-args.min_show:])
 
         if cur_result > best_result:
             best_result = cur_result
+            save_model(model, args.dir, 'model_best.pt')
 
-            model_best = join(args.dir, 'model_best.pt')
-            torch.save(model.net_t.state_dict(), model_best)
-            print('save', model_best)
+    save_model(model, args.dir, 'model_last.pt')
+    save_pickle(explore_rewards, args.dir, 'explore.pkl')
+    save_pickle(exploit_rewards, args.dir, 'exploit.pkl')
+    save_pickle(args, args.dir, 'args.pkl')
+    rename(args.dir, f'{args.dir}_{steps}steps_{cur_result:.2f}goal')
 
-    signal.signal(signal.SIGINT, signal_old)
 
-    model_last = join(args.dir, 'model_last.pt')
-    torch.save(model.net_t.state_dict(), model_last)
+def rename(src, dst):
+    os.rename(src, dst)
+    print(f'rename {src}->{dst}')
 
-    rewards_path = join(args.dir, 'rewards.pkl')
-    with open(rewards_path, 'wb') as f:
-        pickle.dump(rewards, f)
-        print('save', rewards_path)
 
-    os.rename(args.dir, '{}_{}steps_{:.2f}goal'.format(args.arch, steps, cur_result))
+def print_info(eps, losses, explore_rewards, exploit_rewards, args):
+    info = f', eps={eps:.2f}, loss={losses.avg:.2e}'
+    info += last_info(explore_rewards, 'explore', args.min_show)
+    info += last_info(exploit_rewards, 'exploit', args.min_show)
+    print(info)
+
+
+def save_model(model, dir_, name):
+    path = join(dir_, name)
+    torch.save(model.net_t.state_dict(), path)
+    print('save', path)
+
+
+def save_pickle(obj, dir_, name):
+    path = join(dir_, name)
+    with open(path, 'wb') as f:
+        pickle.dump(obj, f)
+    print(f'save {path}')
 
 
 if __name__ == '__main__':
