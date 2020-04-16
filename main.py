@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from model import DQN, DDQN, DuelingDQN, DuelingDDQN
 from replay_pool import ReplayPool
+from average_meter import AverageMeter
 
 import pdb
 
@@ -44,7 +45,7 @@ def parse_args():
                         help='decrease learning rate at these epochs')
     parser.add_argument('--memory_size', type=int, default=1000000,
                         help='decrease learning rate at these epochs')
-    parser.add_argument('--decay_step', type=int, default=1000000,
+    parser.add_argument('--decay_step', type=int, default=3000000,
                         help='decrease learning rate at these epochs')
 
     # Show
@@ -108,12 +109,14 @@ def main():
     for episode in range(episodes):
         if keep_running[0] == False:
             break
-        eps = max(eps - (1/args.decay_step), 0.01)
 
         done = False
         s = env.reset()
 
+        losses = AverageMeter()
+        loss = 0
         while not done:
+            eps = max(eps - (1/args.decay_step), 0.01)
             steps += 1
             print('\r{}: {}'.format(episode, steps), end='')
 
@@ -128,7 +131,8 @@ def main():
 
             if len(pool) >= args.batch_size:
                 batch = pool.sample(args.batch_size, args.gpu)
-                model.train(batch, optimizer, gamma=0.999)
+                loss = model.train(batch, optimizer, gamma=0.999)
+                losses.update(loss, args.batch_size)
 
             if steps % args.update_freq == 0:
                 end = time.time()
@@ -142,7 +146,7 @@ def main():
         if done:
             rewards.append(int(r))
 
-        info = ', eps={:.2f}, avg score {:.2f}'.format(eps, avg(rewards))
+        info = ', eps={:.2f}, loss={:.2e}, avg score {:.2f}'.format(eps, losses.avg, avg(rewards))
 
         if len(rewards) > args.min_show:
             win = sum(r==1 for r in rewards[-args.min_show:])
