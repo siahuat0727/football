@@ -35,15 +35,16 @@ def parse_args():
                         help='no gpu')
 
     # Hyperparams
-    parser.add_argument('--decay_step', type=int, default=30000, help='')
     parser.add_argument('--batch_size', type=int, default=512, help='')
-    parser.add_argument('--hidden_size', type=int, default=256, help='')
-    parser.add_argument('--memory_size', type=int, default=100000, help='')
-    parser.add_argument('--update_freq', type=int, default=2500, help='')
+    parser.add_argument('--hidden_size', type=int, default=1024, help='')
+    parser.add_argument('--memory_size', type=int, default=1000000, help='')
+    parser.add_argument('--update_freq', type=int, default=10000, help='')
     parser.add_argument('--init_episode', type=int, default=100, help='')
-    parser.add_argument('--lr', type=float, default=0.0001, help='')
+    parser.add_argument('--lr', type=float, default=0.00001475, help='')
     parser.add_argument('--gamma', type=float, default=0.999, help='')
-    parser.add_argument('--min_eps', type=float, default=0.02, help='')
+    parser.add_argument('--max_eps', type=float, default=1.0, help='')
+    parser.add_argument('--min_eps', type=float, default=0.01, help='')
+    parser.add_argument('--eps_decay', type=int, default=1000, help='')
 
     # Show
     parser.add_argument('--min_show', type=int, default=100, help='')
@@ -52,7 +53,7 @@ def parse_args():
     args = parser.parse_args()
 
     # Checkpoint directory
-    args.dir = '{}_{}_{}'.format(args.arch, args.env, int(time.time()))
+    args.dir = 'checkpoints/{}_{}_{}'.format(args.arch, args.env, int(time.time()))
     if args.test:
         args.dir = join('/tmp', args.dir)
 
@@ -112,7 +113,7 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     episodes = int(3e9)
-    eps_ = 1.0
+    eps_ = args.max_eps
     steps = 0
 
     explore_rewards = []
@@ -127,9 +128,10 @@ def main():
         if not keep_running[0]:
             break
 
-        if episode % 4 == 0 or episode < args.init_episode:
+        eps_ = max(eps_ - (1/args.eps_decay), args.min_eps)
+
+        if episode % 10 != 0 or episode < args.init_episode:
             rewards = explore_rewards
-            eps_ = max(eps_ - (1/args.decay_step), args.min_eps)
             eps = eps_
         else:
             rewards = exploit_rewards
@@ -188,7 +190,7 @@ def main():
 
 def rename(src, dst):
     os.rename(src, dst)
-    print(f'rename {src}->{dst}')
+    print(f'rename {src} -> {dst}')
 
 
 def print_info(eps, losses, explore_rewards, exploit_rewards, args):
@@ -201,7 +203,7 @@ def print_info(eps, losses, explore_rewards, exploit_rewards, args):
 def save_model(model, dir_, name):
     path = join(dir_, name)
     torch.save(model.net_t.state_dict(), path)
-    print('save', path)
+    print(f'save {path}')
 
 
 def save_pickle(obj, dir_, name):
