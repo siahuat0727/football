@@ -6,13 +6,14 @@ import operator
 import functools
 import os
 from os.path import join
+from collections import namedtuple
 
 import torch
 
 import gfootball.env as football_env
 from replay_pool import ReplayPool
 from average_meter import AverageMeter
-from model import DQN, DDQN, DuelingDQN, DuelingDDQN
+from model import DQN, DDQN, DuelingDQN, DuelingDDQN, PPO, DDPG
 
 
 def np2flattensor(d):
@@ -35,16 +36,23 @@ def parse_args():
                         help='no gpu')
 
     # Hyperparams
-    parser.add_argument('--batch_size', type=int, default=512, help='')
-    parser.add_argument('--hidden_size', type=int, default=1024, help='')
-    parser.add_argument('--memory_size', type=int, default=1000000, help='')
-    parser.add_argument('--update_freq', type=int, default=10000, help='')
-    parser.add_argument('--init_episode', type=int, default=100, help='')
-    parser.add_argument('--lr', type=float, default=0.00001475, help='')
-    parser.add_argument('--gamma', type=float, default=0.999, help='')
-    parser.add_argument('--max_eps', type=float, default=1.0, help='')
-    parser.add_argument('--min_eps', type=float, default=0.01, help='')
-    parser.add_argument('--eps_decay', type=int, default=1000, help='')
+    parser.add_argument('--batch_size', type=int,
+                        default=512, help='batch size')
+    parser.add_argument('--hidden_size', type=int, nargs='+',
+                        default=[1024], help='hidden size')
+    parser.add_argument('--memory_size', type=int,
+                        default=1000000, help='memory size')
+    parser.add_argument('--update_freq', type=int,
+                        default=10000, help='update freq')
+    parser.add_argument('--init_episode', type=int,
+                        default=100, help='init episode')
+    parser.add_argument('--lr', type=float, default=0.00001475, help='lr')
+    parser.add_argument('--gamma', type=float,
+                        default=0.999, help='gamma for q_value')
+    parser.add_argument('--max_eps', type=float, default=1.0, help='max eps')
+    parser.add_argument('--min_eps', type=float, default=0.01, help='min eps')
+    parser.add_argument('--eps_decay', type=int,
+                        default=1000, help='eps decay per episode')
 
     # Show
     parser.add_argument('--min_show', type=int, default=100, help='')
@@ -53,25 +61,35 @@ def parse_args():
     args = parser.parse_args()
 
     # Checkpoint directory
-    args.dir = 'checkpoints/{}_{}_{}'.format(args.arch, args.env, int(time.time()))
+    args.dir = 'checkpoints/{}_{}_{}'.format(
+        args.arch, args.env, int(time.time()))
     if args.test:
         args.dir = join('/tmp', args.dir)
 
-    args.gpu = not args.cpu
+    if args.arch == 'PPO' or args.arch == 'DDPG':
+        args.cumulated_reward=True
+    else:
+        args.cumulated_reward=False #TODO clean
 
+    args.gpu = not args.cpu
+    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN']
     return args
 
 
 def get_env(args):
-    env = football_env.create_environment(env_name=args.env,
-                                          representation='simple115',
-                                          number_of_left_players_agent_controls=1,
-                                          stacked=False,
-                                          logdir=join(
-                                              '/tmp/football', args.dir),
-                                          write_goal_dumps=False,
-                                          write_full_episode_dumps=False,
-                                          render=False)
+    if args.env == 'CartPole-v0':
+        import gym
+        env = gym.make(args.env)
+    else:
+        env = football_env.create_environment(env_name=args.env,
+                                              representation='simple115',
+                                              number_of_left_players_agent_controls=1,
+                                              stacked=False,
+                                              logdir=join(
+                                                  '/tmp/football', args.dir),
+                                              write_goal_dumps=False,
+                                              write_full_episode_dumps=False,
+                                              render=False)
     n_s = functools.reduce(operator.mul, env.observation_space.shape, 1)
     n_a = env.action_space.n
     return env, n_s, n_a
@@ -98,11 +116,14 @@ def main():
         'DDQN': DDQN,
         'DuelingDQN': DuelingDQN,
         'DuelingDDQN': DuelingDDQN,
+        'PPO': PPO,
+        'DDPG': DDPG,
     }
-    model = models[args.arch]([n_s, args.hidden_size, n_a])
+    print(models[args.arch])
+    model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a])
     if args.gpu:
         model = model.cuda()
-    optimizer = torch.optim.Adam(model.net.parameters(), lr=args.lr)
+    # optimizer = torch.optim.Adam(model.net.parameters(), lr=args.lr)
 
     # Signal handling (soft terminate)
     keep_running = [True]
@@ -114,16 +135,23 @@ def main():
 
     episodes = int(3e9)
     eps_ = args.max_eps
-    steps = 0
 
     explore_rewards = []
     exploit_rewards = []
 
-    pool = ReplayPool(args.memory_size)
+    if args.arch == 'PPO':
+        pool = ReplayPool(namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs']),
+                          capacity=args.memory_size,
+                          cumulated_reward=args.cumulated_reward) # TODO
+    else:
+        pool = ReplayPool(namedtuple('Data', ['s', 'a', 'r', 's_']),
+                          capacity=args.memory_size,
+                          cumulated_reward=args.cumulated_reward) # TODO
 
     best_result, cur_result = 0, 0
 
     start = time.time()
+    steps = []
     for episode in range(episodes):
         if not keep_running[0]:
             break
@@ -141,38 +169,56 @@ def main():
         losses = AverageMeter()
 
         done = False
+        step = 0
+        stack = []
         while not done:
-            steps += 1
-            print(f'\r{episode}: {steps}', end='')
+            step += 1
+            print(f'\r{episode}: {sum(steps)+step}', end='')
+            if args.env == 'CartPole-v0':
+                env.render()
 
             # a = env.action_space.sample()
-            a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu)
+            if args.eps_greedy:
+                a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu)
+                logprobs = np2flattensor(s)  # TODO del
+            else:
+                # a, _ = model.choose_act(np2flattensor(s)) # TODO cuda if need
+                a, logprobs = model.choose_act(np2flattensor(s)) # TODO cuda if need
+
 
             s_, r, done, _ = env.step(a)
 
-            pool.append([np2flattensor(s), torch.tensor(a),
-                         torch.tensor(r), np2flattensor(s_), torch.tensor(done)])
+            # if args.env == 'CartPole-v0' and done:
+            #     r = -1.0
+
+            if args.arch == 'PPO':
+                pool.record([np2flattensor(s), torch.tensor(a), torch.tensor(r), np2flattensor(s_), logprobs], done)
+            else:
+                pool.record([np2flattensor(s), torch.tensor(a), torch.tensor(r), np2flattensor(s_)], done)
             s = s_
 
-            if len(pool) >= args.batch_size:
-                batch = pool.sample(args.batch_size, args.gpu)
-                loss = model.train(batch, optimizer, gamma=args.gamma)
-                losses.update(loss, args.batch_size)
+            if len(pool) < args.batch_size:  # TODO change to more that init steps
+                continue
 
-            if steps % args.update_freq == 0:
-                model.update_net_t()
+            batch = pool.sample(args.batch_size, args.gpu)
+            loss = model.step(batch, gamma=args.gamma)
+            # loss = model.step(batch, optimizer, gamma=args.gamma)
+            losses.update(loss, args.batch_size)
+
+            if (sum(steps) + step) % args.update_freq == 0:
+                # model.update_net_t()  # TODO
 
                 end = time.time()
-                print('\nTime elapsed for {} steps: {:.2f} s'.format(
-                    args.update_freq, end-start))
-                print('10M step left {:.2f} hours'.format(
-                    (end-start)*(1e7-steps)/args.update_freq/3600))
+                # print('\nTime elapsed for {} steps: {:.2f} s'.format(
+                #     args.update_freq, end-start))
+                # print('10M step left {:.2f} hours'.format(
+                #     (end-start)*(1e7-steps)/args.update_freq/3600))
                 start = end
 
-        if done:
-            rewards.append(int(r))
+        rewards.append(int(r))
+        steps.append(step)
 
-        print_info(eps, losses, explore_rewards, exploit_rewards, args)
+        print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
 
         if len(exploit_rewards) >= args.min_show:
             cur_result = avg(exploit_rewards[-args.min_show:])
@@ -185,7 +231,8 @@ def main():
     save_pickle(explore_rewards, args.dir, 'explore.pkl')
     save_pickle(exploit_rewards, args.dir, 'exploit.pkl')
     save_pickle(args, args.dir, 'args.pkl')
-    rename(args.dir, f'{args.dir}_{steps}steps_{cur_result:.2f}goal')
+    rename_dir = ''.join(args.dir.split('_')[:-1])
+    rename(args.dir, f'{rename_dir}_{sum(steps)}steps_{cur_result:.2f}goal')
 
 
 def rename(src, dst):
@@ -193,8 +240,8 @@ def rename(src, dst):
     print(f'rename {src} -> {dst}')
 
 
-def print_info(eps, losses, explore_rewards, exploit_rewards, args):
-    info = f', eps={eps:.2f}, loss={losses.avg:.2e}'
+def print_info(step, eps, losses, explore_rewards, exploit_rewards, args):
+    info = f', step={step}, eps={eps:.2f}, loss={losses.avg:.2e}'
     info += last_info(explore_rewards, 'explore', args.min_show)
     info += last_info(exploit_rewards, 'exploit', args.min_show)
     print(info)
@@ -202,7 +249,7 @@ def print_info(eps, losses, explore_rewards, exploit_rewards, args):
 
 def save_model(model, dir_, name):
     path = join(dir_, name)
-    torch.save(model.net_t.state_dict(), path)
+    torch.save(model.net_t.state_dict(), path) # TODO
     print(f'save {path}')
 
 
