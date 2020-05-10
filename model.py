@@ -60,6 +60,7 @@ class _Net(ABC):
 
         self.optim.zero_grad()  # TODO init?
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
         self.optim.step()
         return loss.item()
 
@@ -153,6 +154,7 @@ class ActorCritic(nn.Module):
         with torch.no_grad():
             dist = self._s2d(s)
         a = dist.sample()
+
         logprobs = self._a2p(a, dist)
         return a.item(), logprobs
 
@@ -165,11 +167,13 @@ class ActorCritic(nn.Module):
         return self.critic(s)
 
 
-class PPO(_Net):
+class PPO(nn.Module, _Net):
     def __init__(self, *args, lr=1e-3, **kwargs):
+        super().__init__()
         self.net = ActorCritic(*args, **kwargs)
         self.mse_loss = nn.MSELoss(reduction='none')
         self.clip_eps = 0.2
+        print('ppo', lr)
         self.optim = torch.optim.Adam(self.net.parameters(), lr=lr)
 
     def _loss(self, batch, gamma):
@@ -181,9 +185,8 @@ class PPO(_Net):
         ratios = torch.exp(logprobs - batch.logprobs)
 
         # advantage A(s,a) = R + yV(s') - V(s)
-        # r = (batch.r - batch.r.mean())
-        r = (batch.r - batch.r.mean()) / batch.r.std()
-        advs = r - v.detach()
+        # r = (batch.r - batch.r.mean()) / batch.r.std()  # TODO normalized?
+        advs = batch.r - v.detach()
         assert batch.r.size() == v.size() == ratios.size(), \
             f'{v.size()} {batch.r.size()} {ratios.size()}'
 
@@ -191,9 +194,14 @@ class PPO(_Net):
         actor_loss2 = torch.clamp(ratios, 1-self.clip_eps, 1+self.clip_eps) * advs
 
         actor_loss = torch.min(actor_loss1, actor_loss2)  # TODO better name?
-        critic_loss = 0.5 * self.mse_loss(v, r)
-        entropy_loss = 0.01 * entropy
+        critic_loss = 0.5 * self.mse_loss(v, batch.r)
+        entropy_loss = 0.000001 * entropy
 
+        print()
+        print('---')
+        print('a', actor_loss.mean().item())
+        print('c', critic_loss.mean().item())
+        print('e', entropy_loss.mean().item())
 
         # minus sign for gradient acsent
         loss = critic_loss - actor_loss - entropy_loss

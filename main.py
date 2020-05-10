@@ -37,7 +37,7 @@ def parse_args():
 
     # Hyperparams
     parser.add_argument('--batch_size', type=int,
-                        default=512, help='batch size')
+                        default=2048, help='batch size')
     parser.add_argument('--hidden_size', type=int, nargs='+',
                         default=[1024], help='hidden size')
     parser.add_argument('--memory_size', type=int,
@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--update_freq', type=int,
                         default=10000, help='update freq')
     parser.add_argument('--init_episode', type=int,
-                        default=100, help='init episode')
+                        default=0, help='init episode')
     parser.add_argument('--lr', type=float, default=0.00001475, help='lr')
     parser.add_argument('--gamma', type=float,
                         default=0.999, help='gamma for q_value')
@@ -67,9 +67,9 @@ def parse_args():
         args.dir = join('/tmp', args.dir)
 
     if args.arch == 'PPO' or args.arch == 'DDPG':
-        args.cumulated_reward=True
+        args.cumulated_reward = True
     else:
-        args.cumulated_reward=False #TODO clean
+        args.cumulated_reward = False  # TODO clean
 
     args.gpu = not args.cpu
     args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN']
@@ -136,36 +136,39 @@ def main():
     episodes = int(3e9)
     eps_ = args.max_eps
 
-    explore_rewards = []
-    exploit_rewards = []
-
     if args.arch == 'PPO':
         pool = ReplayPool(namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs']),
                           capacity=args.memory_size,
-                          cumulated_reward=args.cumulated_reward) # TODO
+                          cumulated_reward=args.cumulated_reward)  # TODO
     else:
         pool = ReplayPool(namedtuple('Data', ['s', 'a', 'r', 's_']),
                           capacity=args.memory_size,
-                          cumulated_reward=args.cumulated_reward) # TODO
+                          cumulated_reward=args.cumulated_reward)  # TODO
 
     best_result, cur_result = 0, 0
 
     start = time.time()
     steps = []
+    losss = []
+    explore_rewards = []
+    exploit_rewards = []
+    rewards = exploit_rewards
     for episode in range(episodes):
         if not keep_running[0]:
             break
 
         eps_ = max(eps_ - (1/args.eps_decay), args.min_eps)
 
-        if episode % 10 != 0 or episode < args.init_episode:
-            rewards = explore_rewards
-            eps = eps_
-        else:
-            rewards = exploit_rewards
-            eps = 0.0
+        # if episode % 10 != 0 or episode < args.init_episode:
+        #     rewards = explore_rewards
+        #     eps = eps_
+        # else:
+        #     rewards = exploit_rewards
+        #     eps = 0.0
 
         s = env.reset()
+        s = np2flattensor(s)
+
         losses = AverageMeter()
 
         done = False
@@ -179,22 +182,25 @@ def main():
 
             # a = env.action_space.sample()
             if args.eps_greedy:
-                a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu)
-                logprobs = np2flattensor(s)  # TODO del
+                a, _ = model.eps_greedy(s, n_a, eps, args.gpu)
+                logprobs = s  # TODO del
             else:
-                # a, _ = model.choose_act(np2flattensor(s)) # TODO cuda if need
-                a, logprobs = model.choose_act(np2flattensor(s)) # TODO cuda if need
+                if args.gpu:
+                    s = s.cuda()
 
+                a, logprobs = model.choose_act(s)
 
             s_, r, done, _ = env.step(a)
+            s_ = np2flattensor(s_)
 
             # if args.env == 'CartPole-v0' and done:
             #     r = -1.0
 
             if args.arch == 'PPO':
-                pool.record([np2flattensor(s), torch.tensor(a), torch.tensor(r), np2flattensor(s_), logprobs], done)
+                pool.record(
+                    [s, torch.tensor(a), torch.tensor(r), s_, logprobs], done)
             else:
-                pool.record([np2flattensor(s), torch.tensor(a), torch.tensor(r), np2flattensor(s_)], done)
+                pool.record([s, torch.tensor(a), torch.tensor(r), s_], done)
             s = s_
 
             if len(pool) < args.batch_size:  # TODO change to more that init steps
@@ -206,32 +212,38 @@ def main():
             losses.update(loss, args.batch_size)
 
             if (sum(steps) + step) % args.update_freq == 0:
+                pass
                 # model.update_net_t()  # TODO
-
-                end = time.time()
-                # print('\nTime elapsed for {} steps: {:.2f} s'.format(
-                #     args.update_freq, end-start))
-                # print('10M step left {:.2f} hours'.format(
-                #     (end-start)*(1e7-steps)/args.update_freq/3600))
-                start = end
 
         rewards.append(int(r))
         steps.append(step)
+        losss.append(losses.avg)
 
-        print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
+        print_info(step, None, losses, explore_rewards, exploit_rewards, args)
+        # print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
+
+        if episode % 100 == 0:
+            end = time.time()
+            print(
+                f'\nTime elapsed for {sum(steps[-100:])} steps: {end-start:.2f} s')
+            print('10M step left {:.2f} hours'.format(
+                (end-start)*(1e7-sum(steps))/sum(steps[-100:])/3600))
+            start = end
 
         if len(exploit_rewards) >= args.min_show:
             cur_result = avg(exploit_rewards[-args.min_show:])
 
         if cur_result > best_result:
             best_result = cur_result
-            save_model(model, args.dir, 'model_best.pt')
+            # save_model(model, args.dir, 'model_best.pt')
 
-    save_model(model, args.dir, 'model_last.pt')
+    # save_model(model, args.dir, 'model_last.pt')
     save_pickle(explore_rewards, args.dir, 'explore.pkl')
     save_pickle(exploit_rewards, args.dir, 'exploit.pkl')
+    save_pickle(steps, args.dir, 'steps.pkl')
+    save_pickle(losss, args.dir, 'losss.pkl')
     save_pickle(args, args.dir, 'args.pkl')
-    rename_dir = ''.join(args.dir.split('_')[:-1])
+    rename_dir = '_'.join(args.dir.split('_')[:-1])
     rename(args.dir, f'{rename_dir}_{sum(steps)}steps_{cur_result:.2f}goal')
 
 
@@ -241,15 +253,16 @@ def rename(src, dst):
 
 
 def print_info(step, eps, losses, explore_rewards, exploit_rewards, args):
-    info = f', step={step}, eps={eps:.2f}, loss={losses.avg:.2e}'
-    info += last_info(explore_rewards, 'explore', args.min_show)
+    # info = f', step={step}, eps={eps:.2f}, loss={losses.avg:.2e}'
+    info = f', step={step}, loss={losses.avg:.2e}'
+    # info += last_info(explore_rewards, 'explore', args.min_show)
     info += last_info(exploit_rewards, 'exploit', args.min_show)
     print(info)
 
 
 def save_model(model, dir_, name):
     path = join(dir_, name)
-    torch.save(model.net_t.state_dict(), path) # TODO
+    # torch.save(model.net.state_dict(), path) # TODO
     print(f'save {path}')
 
 
