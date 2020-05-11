@@ -1,7 +1,6 @@
 import copy
 import random
 from abc import ABC, abstractmethod
-from gumbel import * #TODO
 
 import torch
 from torch import nn
@@ -215,12 +214,15 @@ class PPO(nn.Module, _Net):
 class Actor(_FCNet):
     def __init__(self, lr=1e-3, **kwargs):
         super().__init__(activation=nn.Tanh, **kwargs)
+        # super().__init__(**kwargs)
         self.optim = Adam(self.parameters(), lr=lr)
-        self.tanh = nn.Tanh()
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, add_noise=True, **kwargs):
         x = super().forward(*args, **kwargs)
-        return self.tanh(x)
+        if add_noise:
+            x += torch.randn(x.size()) * 0.1
+        x = torch.nn.functional.gumbel_softmax(x, hard=True)
+        return x
 
 
 class Critic(_FCNet):
@@ -250,11 +252,16 @@ class DDPG(_Net):
         self.tau = tau
         self._loss_fn = nn.MSELoss()  #TODO duplicate
 
-    def choose_act(self, s):
+    def choose_act(self, s, add_noise=True):
         s = s.unsqueeze(0)
-        return self.actor_t(s).squeeze().argmax().item(), None
+        return self.actor_t(s, add_noise=add_noise).argmax().item(), None
 
     def _loss_critic(self, batch, gamma=0.99, **kwargs):
+
+        def onehot(a, n_a):
+            ret = torch.eye(n_a)[a.squeeze()]
+            return ret
+
         q_eval = self.critic(batch.s, onehot(batch.a, 2))  # same as dqlearning  # n_a
         q_next = self.critic_t(batch.s_, self.actor_t(batch.s_))
         q_target = batch.r + gamma * q_next
@@ -262,9 +269,8 @@ class DDPG(_Net):
 
     def _loss_actor(self, batch, **kwargs):
         act_logits = self.actor(batch.s)
-        out = gumbel_softmax(act_logits, hard=True)
 
-        loss = -self.critic(batch.s, out).mean() + 1e-3*(act_logits**2).mean()  #TODO l2norm
+        loss = -self.critic(batch.s, act_logits).mean() #TODO regularize?+ 1e-3*(act_logits**2).mean()  #TODO l2norm
         return loss
 
     def _loss(self):
@@ -282,11 +288,13 @@ class DDPG(_Net):
         critic_loss = self._loss_critic(batch, **kwargs)
         self.critic.optim.zero_grad()
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic.optim.step()
 
         actor_loss = self._loss_actor(batch)
         self.actor.optim.zero_grad()
         actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor.optim.step()
 
         self.soft_update()

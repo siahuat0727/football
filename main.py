@@ -1,5 +1,6 @@
 import time
 import signal
+import random
 import pickle
 import argparse
 import operator
@@ -72,7 +73,7 @@ def parse_args():
         args.cumulated_reward = False  # TODO clean
 
     args.gpu = not args.cpu
-    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN']
+    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG']
     return args
 
 
@@ -103,6 +104,15 @@ def last_info(rewards, name, min_show):
     return f', {name} last {min_show} win={win} lose={lose}'
 
 
+def choose_act(model, s, n_a, eps=0.1, cuda=False):  # TODO eps case in main function
+    if random.random() < eps:
+        return random.randrange(n_a), None
+    else:
+        if cuda:
+            s = s.cuda()
+        s = s.unsqueeze(0)
+        return model.choose_act(s, add_noise=False)
+
 def main():
     args = parse_args()
     print(args)
@@ -119,7 +129,6 @@ def main():
         'PPO': PPO,
         'DDPG': DDPG,
     }
-    print(models[args.arch])
     model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a])
     if args.gpu:
         model = model.cuda()
@@ -182,8 +191,8 @@ def main():
 
             # a = env.action_space.sample()
             if args.eps_greedy:
-                a, _ = model.eps_greedy(s, n_a, eps, args.gpu)
-                logprobs = s  # TODO del
+                a, _ = choose_act(model, s, n_a, eps, args.gpu)
+                # a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu) #TODO DQN...
             else:
                 if args.gpu:
                     s = s.cuda()
@@ -222,13 +231,13 @@ def main():
         print_info(step, None, losses, explore_rewards, exploit_rewards, args)
         # print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
 
-        if episode % 100 == 0:
-            end = time.time()
-            print(
-                f'\nTime elapsed for {sum(steps[-100:])} steps: {end-start:.2f} s')
-            print('10M step left {:.2f} hours'.format(
-                (end-start)*(1e7-sum(steps))/sum(steps[-100:])/3600))
-            start = end
+        # if episode % 100 == 0:
+        #     end = time.time()
+        #     print(
+        #         f'\nTime elapsed for {sum(steps[-100:])} steps: {end-start:.2f} s')
+        #     print('10M step left {:.2f} hours'.format(
+        #         (end-start)*(1e7-sum(steps))/sum(steps[-100:])/3600))
+        #     start = end
 
         if len(exploit_rewards) >= args.min_show:
             cur_result = avg(exploit_rewards[-args.min_show:])
