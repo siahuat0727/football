@@ -139,8 +139,8 @@ class DuelingDDQN(_DQLearningMixin, _QNet):
 class ActorCritic(nn.Module):
     def __init__(self, dims):
         super().__init__()
-        self.actor = _FCNet(dims)
-        self.critic = _FCNet(dims[:-1] + [1])
+        self.actor = _FCNet(dims, activation=nn.Tanh)
+        self.critic = _FCNet(dims[:-1] + [1], activation=nn.Tanh)
 
     def _s2d(self, s, a=None):
         return Categorical(nn.Softmax(dim=-1)(self.actor(s)))
@@ -156,7 +156,8 @@ class ActorCritic(nn.Module):
         a = dist.sample()
 
         logprobs = self._a2p(a, dist)
-        return a.item(), logprobs
+        # return a, logprobs
+        return a.item(), logprobs #TODO
 
     def analysis(self, s, a):
         dist = self._s2d(s)
@@ -173,10 +174,9 @@ class PPO(nn.Module, _Net):
         self.net = ActorCritic(*args, **kwargs)
         self.mse_loss = nn.MSELoss(reduction='none')
         self.clip_eps = 0.2
-        print('ppo', lr)
-        self.optim = torch.optim.Adam(self.net.parameters(), lr=lr)
+        self.optim = torch.optim.Adam(self.net.parameters(), lr=lr, betas=(0.9, 0.999))
 
-    def _loss(self, batch, gamma):
+    def _loss(self, batch, **kwargs):
 
         logprobs, entropy = self.net.analysis(batch.s, batch.a)
         v = self.net.s2v(batch.s)
@@ -195,13 +195,13 @@ class PPO(nn.Module, _Net):
 
         actor_loss = torch.min(actor_loss1, actor_loss2)  # TODO better name?
         critic_loss = 0.5 * self.mse_loss(v, batch.r)
-        entropy_loss = 0.000001 * entropy
+        entropy_loss = 0.001 * entropy
 
-        print()
-        print('---')
-        print('a', actor_loss.mean().item())
-        print('c', critic_loss.mean().item())
-        print('e', entropy_loss.mean().item())
+        # print()
+        # print('---')
+        # print('a', actor_loss.mean().item())
+        # print('c', critic_loss.mean().item())
+        # print('e', entropy_loss.mean().item())
 
         # minus sign for gradient acsent
         loss = critic_loss - actor_loss - entropy_loss

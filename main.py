@@ -46,7 +46,7 @@ def parse_args():
                         default=10000, help='update freq')
     parser.add_argument('--init_episode', type=int,
                         default=0, help='init episode')
-    parser.add_argument('--lr', type=float, default=0.00001475, help='lr')
+    parser.add_argument('--lr', type=float, default=0.0001475, help='lr')
     parser.add_argument('--gamma', type=float,
                         default=0.999, help='gamma for q_value')
     parser.add_argument('--max_eps', type=float, default=1.0, help='max eps')
@@ -206,14 +206,34 @@ def main():
             if len(pool) < args.batch_size:  # TODO change to more that init steps
                 continue
 
-            batch = pool.sample(args.batch_size, args.gpu)
-            loss = model.step(batch, gamma=args.gamma)
-            # loss = model.step(batch, optimizer, gamma=args.gamma)
-            losses.update(loss, args.batch_size)
+
+
+            # if step % 5 == 0:
+            #     batch = pool.sample(args.batch_size, args.gpu)
+            #     loss = model.step(batch, gamma=args.gamma)
+            #     # loss = model.step(batch, optimizer, gamma=args.gamma)
+            #     losses.update(loss, args.batch_size)
 
             if (sum(steps) + step) % args.update_freq == 0:
                 pass
                 # model.update_net_t()  # TODO
+
+        if len(pool) >= args.batch_size:
+            def _list2tensor(data, cuda):
+                data = list(zip(*data))
+                data = [torch.stack(d).view(len(d), -1) for d in data]
+                if cuda:
+                    data = [d.cuda() for d in data]
+                return data
+
+            batch = namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs'])(*_list2tensor(pool._memory, args.gpu))
+            print('size', len(pool))
+
+            for _ in range(8):
+                loss = model.step(batch)
+                losses.update(loss, len(pool))
+            while len(pool):
+                pool._pop()
 
         rewards.append(int(r))
         steps.append(step)
