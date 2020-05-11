@@ -6,6 +6,7 @@ from collections import deque
 class ReplayPool:
 
     def __init__(self, data_type, capacity=100000, cumulated_reward=False):
+        self.capacity = capacity
         self._memory = deque(maxlen=capacity)
         self.capacity = capacity
         self.T = data_type
@@ -34,6 +35,9 @@ class ReplayPool:
 
     def append(self, data):
         self._append(self.T(*data))
+
+    def clean(self):
+        self._memory = deque(maxlen=self.capacity)
 
     def _pop(self):
         self._memory.pop()

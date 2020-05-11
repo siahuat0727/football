@@ -54,6 +54,8 @@ def parse_args():
     parser.add_argument('--min_eps', type=float, default=0.01, help='min eps')
     parser.add_argument('--eps_decay', type=int,
                         default=1000, help='eps decay per episode')
+    parser.add_argument('--k_epoch', type=int,
+                        default=0, help='update k_epoch after sample')
 
     # Show
     parser.add_argument('--min_show', type=int, default=100, help='')
@@ -67,10 +69,13 @@ def parse_args():
     if args.test:
         args.dir = join('/tmp', args.dir)
 
+    # if args.arch == 'PPO' or args.arch == 'DDPG':
     if args.arch == 'PPO' or args.arch == 'DDPG':
         args.cumulated_reward = True
     else:
         args.cumulated_reward = False  # TODO clean
+
+    args.update_per_step = args.k_epoch == 0
 
     args.gpu = not args.cpu
     args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG']
@@ -159,6 +164,7 @@ def main():
     start = time.time()
     steps = []
     losss = []
+    losss2 = []
     explore_rewards = []
     exploit_rewards = []
     rewards = exploit_rewards
@@ -168,17 +174,18 @@ def main():
 
         eps_ = max(eps_ - (1/args.eps_decay), args.min_eps)
 
-        # if episode % 10 != 0 or episode < args.init_episode:
-        #     rewards = explore_rewards
-        #     eps = eps_
-        # else:
-        #     rewards = exploit_rewards
-        #     eps = 0.0
+        if episode % 10 != 0 or episode < args.init_episode:
+            rewards = explore_rewards
+            eps = eps_
+        else:
+            rewards = exploit_rewards
+            eps = 0.0
 
         s = env.reset()
         s = np2flattensor(s)
 
         losses = AverageMeter()
+        losses2 = AverageMeter()
 
         done = False
         step = 0
@@ -215,19 +222,19 @@ def main():
             if len(pool) < args.batch_size:  # TODO change to more that init steps
                 continue
 
-
-
-            # if step % 5 == 0:
-            #     batch = pool.sample(args.batch_size, args.gpu)
-            #     loss = model.step(batch, gamma=args.gamma)
-            #     # loss = model.step(batch, optimizer, gamma=args.gamma)
-            #     losses.update(loss, args.batch_size)
+            if args.update_per_step:
+                batch = pool.sample(args.batch_size, args.gpu)
+                loss1, loss2 = model.step(batch, gamma=args.gamma)
+                # loss = model.step(batch, gamma=args.gamma)
+                # losses.update(loss, args.batch_size)
+                losses.update(loss1, args.batch_size)
+                losses2.update(loss2, args.batch_size)
 
             if (sum(steps) + step) % args.update_freq == 0:
                 pass
                 # model.update_net_t()  # TODO
 
-        if len(pool) >= args.batch_size:
+        if not args.update_per_step and len(pool) >= args.batch_size:
             def _list2tensor(data, cuda):
                 data = list(zip(*data))
                 data = [torch.stack(d).view(len(d), -1) for d in data]
@@ -236,28 +243,30 @@ def main():
                 return data
 
             batch = namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs'])(*_list2tensor(pool._memory, args.gpu))
-            print('size', len(pool))
 
-            for _ in range(8):
+            for _ in range(args.k_epoch):
                 loss = model.step(batch)
                 losses.update(loss, len(pool))
-            while len(pool):
-                pool._pop()
+            pool.clean()
 
         rewards.append(int(r))
         steps.append(step)
         losss.append(losses.avg)
+        losss2.append(losses2.avg)
 
-        print_info(step, None, losses, explore_rewards, exploit_rewards, args)
+
+        # print_info(step, None, losses, explore_rewards, exploit_rewards, args)
         # print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
+        print_info(step, eps, losses, losses2, explore_rewards, exploit_rewards, args)
 
-        # if episode % 100 == 0:
-        #     end = time.time()
-        #     print(
-        #         f'\nTime elapsed for {sum(steps[-100:])} steps: {end-start:.2f} s')
-        #     print('10M step left {:.2f} hours'.format(
-        #         (end-start)*(1e7-sum(steps))/sum(steps[-100:])/3600))
-        #     start = end
+
+        if episode % 100 == 0:
+            end = time.time()
+            print(
+                f'\nTime elapsed for {sum(steps[-100:])} steps: {end-start:.2f} s')
+            print('10M step left {:.2f} hours'.format(
+                (end-start)*(1e7-sum(steps))/sum(steps[-100:])/3600))
+            start = end
 
         if len(exploit_rewards) >= args.min_show:
             cur_result = avg(exploit_rewards[-args.min_show:])
@@ -281,9 +290,10 @@ def rename(src, dst):
     print(f'rename {src} -> {dst}')
 
 
-def print_info(step, eps, losses, explore_rewards, exploit_rewards, args):
+# def print_info(step, eps, losses, explore_rewards, exploit_rewards, args):
+def print_info(step, eps, losses, losses2, explore_rewards, exploit_rewards, args):
     # info = f', step={step}, eps={eps:.2f}, loss={losses.avg:.2e}'
-    info = f', step={step}, loss={losses.avg:.2e}'
+    info = f', step={step}, loss critic={losses.avg:.2e}, loss actor={losses2.avg:.2e}'
     # info += last_info(explore_rewards, 'explore', args.min_show)
     info += last_info(exploit_rewards, 'exploit', args.min_show)
     print(info)

@@ -214,7 +214,6 @@ class PPO(nn.Module, _Net):
 class Actor(_FCNet):
     def __init__(self, lr=1e-3, **kwargs):
         super().__init__(activation=nn.Tanh, **kwargs)
-        # super().__init__(**kwargs)
         self.optim = Adam(self.parameters(), lr=lr)
 
     def forward(self, *args, add_noise=True, **kwargs):
@@ -299,4 +298,4 @@ class DDPG(_Net):
 
         self.soft_update()
         # return critic_loss.item(), actor_loss.item() #TODO
-        return critic_loss.item()
+        return critic_loss.item(), actor_loss.item()
