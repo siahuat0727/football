@@ -53,7 +53,7 @@ def parse_args():
     parser.add_argument('--max_eps', type=float, default=1.0, help='max eps')
     parser.add_argument('--min_eps', type=float, default=0.01, help='min eps')
     parser.add_argument('--eps_decay', type=int,
-                        default=1000, help='eps decay per episode')
+                        default=500, help='eps decay per episode')
     parser.add_argument('--k_epoch', type=int,
                         default=0, help='update k_epoch after sample')
 
@@ -293,8 +293,8 @@ def rename(src, dst):
 # def print_info(step, eps, losses, explore_rewards, exploit_rewards, args):
 def print_info(step, eps, losses, losses2, explore_rewards, exploit_rewards, args):
     # info = f', step={step}, eps={eps:.2f}, loss={losses.avg:.2e}'
-    info = f', step={step}, loss critic={losses.avg:.2e}, loss actor={losses2.avg:.2e}'
-    # info += last_info(explore_rewards, 'explore', args.min_show)
+    info = f', step={step}, eps={eps:.2f}, loss critic={losses.avg:.2e}, loss actor={losses2.avg:.2e}'
+    info += last_info(explore_rewards, 'explore', args.min_show)
     info += last_info(exploit_rewards, 'exploit', args.min_show)
     print(info)
 
