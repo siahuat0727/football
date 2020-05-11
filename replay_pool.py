@@ -11,15 +11,15 @@ class ReplayPool:
         self.T = data_type
         self.stack = []
         self.cumulated_reward = cumulated_reward
-        self.gamma = 0.8 # TODO assign
+        self.gamma = 0.99 # TODO assign
 
     def record(self, data, done):
         if not self.cumulated_reward:
             self.append(data)
             return
 
+        self.stack.append(data)
         if not done:
-            self.stack.append(data)
             return
 
         total_r = None
@@ -36,7 +36,7 @@ class ReplayPool:
         self._append(self.T(*data))
 
     def _pop(self):
-        self._memory.pop(0)
+        self._memory.pop()
 
     def _append(self, data):
         self._memory.append(data)
