@@ -32,9 +32,8 @@ def parse_args():
     # Experiment setting
     parser.add_argument('--arch', type=str, default='DQN',
                         help='decrease learning rate at these epochs')
-    parser.add_argument('--cpu', action='store_true', help='no gpu')
     parser.add_argument('--env', type=str, default='academy_empty_goal',
-                        help='no gpu')
+                        help='env')
 
     # Hyperparams
     parser.add_argument('--batch_size', type=int,
@@ -75,10 +74,12 @@ def parse_args():
     else:
         args.cumulated_reward = False  # TODO clean
 
+    assert args.arch != 'PPO' or args.k_epoch > 0, f'Using PPO, k_epoch must > 0'
+
     args.update_per_step = args.k_epoch == 0
 
-    args.gpu = not args.cpu
-    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG', 'TD3']
+    args.eps_greedy = args.arch in [
+        'DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG', 'TD3']
     return args
 
 
@@ -109,18 +110,19 @@ def last_info(rewards, name, min_show):
     return f', {name} last {min_show} win={win} lose={lose}'
 
 
-def choose_act(model, s, n_a, eps=0.1, cuda=False):  # TODO eps case in main function
+def choose_act(model, s, n_a, eps=0.1):  # TODO eps case in main function
     if random.random() < eps:
-        return random.randrange(n_a), None
+        a_random = random.randrange(n_a)
+        return torch.tensor(a_random).to(s.device), None
     else:
-        if cuda:
-            s = s.cuda()
-        s = s.unsqueeze(0)
-        return model.choose_act(s, add_noise=False)
+        return model.choose_act(s.unsqueeze(0), add_noise=False)
+
 
 def main():
     args = parse_args()
     print(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     os.makedirs(args.dir)
 
@@ -135,12 +137,7 @@ def main():
         'DDPG': DDPG,
         'TD3': TD3,
     }
-    if args.arch in ['DDPG', 'TD3']:
-        model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a], n_a=n_a) #TODO
-    else:
-        model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a])
-    if args.gpu:
-        model = model.cuda()
+    model = models[args.arch](in_dim=n_s, hid_dims=args.hidden_size, out_dim=n_a, lr=args.lr).to(device)
     # optimizer = torch.optim.Adam(model.net.parameters(), lr=args.lr)
 
     # Signal handling (soft terminate)
@@ -186,7 +183,7 @@ def main():
             eps = 0.0
 
         s = env.reset()
-        s = np2flattensor(s)
+        s = np2flattensor(s).to(device)
 
         losses = AverageMeter()
         losses2 = AverageMeter()
@@ -202,25 +199,23 @@ def main():
 
             # a = env.action_space.sample()
             if args.eps_greedy:
-                a, _ = choose_act(model, s, n_a, eps, args.gpu)
-                # a = model.eps_greedy(np2flattensor(s), n_a, eps, args.gpu) #TODO DQN...
+                a, _ = choose_act(model, s, n_a, eps)
             else:
-                if args.gpu:
-                    s = s.cuda()
+                a, logprobs = model.choose_act(s.unsqueeze(0))
 
-                a, logprobs = model.choose_act(s)
-
-            s_, r, done, _ = env.step(a)
-            s_ = np2flattensor(s_)
+            a = a.detach()
+            s_, r, done, _ = env.step(a.item())
 
             if args.env == 'CartPole-v0' and done:
                 r = -1.0
 
+            s_ = np2flattensor(s_).to(device)
+            r = torch.tensor(r).to(device)
+
             if args.arch == 'PPO':
-                pool.record(
-                    [s, torch.tensor(a), torch.tensor(r), s_, logprobs], done)
+                pool.record([s, a, r, s_, logprobs], done)
             else:
-                pool.record([s, torch.tensor(a), torch.tensor(r), s_], done)
+                pool.record([s, a, r, s_], done)
 
             s = s_
 
@@ -228,7 +223,7 @@ def main():
                 continue
 
             if args.update_per_step:
-                batch = pool.sample(args.batch_size, args.gpu)
+                batch = pool.sample(args.batch_size)
                 if args.arch in ['DDPG', 'TD3']:
                     loss1, loss2 = model.step(batch, gamma=args.gamma)
                     losses.update(loss1, args.batch_size)
@@ -242,14 +237,13 @@ def main():
                 # model.update_net_t()  # TODO
 
         if not args.update_per_step and len(pool) >= args.batch_size:
-            def _list2tensor(data, cuda):
+            def _list2tensor(data):
                 data = list(zip(*data))
                 data = [torch.stack(d).view(len(d), -1) for d in data]
-                if cuda:
-                    data = [d.cuda() for d in data]
                 return data
 
-            batch = namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs'])(*_list2tensor(pool._memory, args.gpu))
+            batch = namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs'])(
+                *_list2tensor(pool._memory))
 
             for _ in range(args.k_epoch):
                 loss = model.step(batch)
@@ -261,11 +255,10 @@ def main():
         losss.append(losses.avg)
         losss2.append(losses2.avg)
 
-
         # print_info(step, None, losses, explore_rewards, exploit_rewards, args)
         # print_info(step, eps, losses, explore_rewards, exploit_rewards, args)
-        print_info(step, eps, losses, losses2, explore_rewards, exploit_rewards, args)
-
+        print_info(step, eps, losses, losses2,
+                   explore_rewards, exploit_rewards, args)
 
         if episode % 100 == 0:
             end = time.time()

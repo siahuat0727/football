@@ -50,16 +50,14 @@ class ReplayPool:
     def __len__(self):
         return len(self._memory)
 
-    def sample(self, batch_size, cuda=False):
+    def sample(self, batch_size):
         batch_size = min([len(self), batch_size])
         samples = random.sample(self._memory, batch_size)
-        batch = self.T(*_list2tensor(samples, cuda))
+        batch = self.T(*_list2tensor(samples))
         return batch
 
 
-def _list2tensor(data, cuda):
+def _list2tensor(data):
     data = list(zip(*data))
     data = [torch.stack(d).view(len(d), -1) for d in data]
-    if cuda:
-        data = [d.cuda() for d in data]
     return data
