@@ -134,7 +134,10 @@ def main():
         'PPO': PPO,
         'DDPG': DDPG,
     }
-    model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a])
+    if args.arch in ['DDPG', 'TD3']:
+        model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a], n_a=n_a) #TODO
+    else:
+        model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a])
     if args.gpu:
         model = model.cuda()
     # optimizer = torch.optim.Adam(model.net.parameters(), lr=args.lr)
@@ -224,11 +227,13 @@ def main():
 
             if args.update_per_step:
                 batch = pool.sample(args.batch_size, args.gpu)
-                loss1, loss2 = model.step(batch, gamma=args.gamma)
-                # loss = model.step(batch, gamma=args.gamma)
-                # losses.update(loss, args.batch_size)
-                losses.update(loss1, args.batch_size)
-                losses2.update(loss2, args.batch_size)
+                if args.arch in ['DDPG', 'TD3']:
+                    loss1, loss2 = model.step(batch, gamma=args.gamma)
+                    losses.update(loss1, args.batch_size)
+                    losses2.update(loss2, args.batch_size)
+                else:
+                    loss = model.step(batch, gamma=args.gamma)
+                    losses.update(loss, args.batch_size)
 
             if (sum(steps) + step) % args.update_freq == 0:
                 pass

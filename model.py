@@ -173,7 +173,7 @@ class PPO(nn.Module, _Net):
         self.net = ActorCritic(*args, **kwargs)
         self.mse_loss = nn.MSELoss(reduction='none')
         self.clip_eps = 0.2
-        self.optim = torch.optim.Adam(self.net.parameters(), lr=lr, betas=(0.9, 0.999))
+        self.optim = torch.optim.Adam(self.net.parameters(), lr=lr, weight_decay=1e-5)
 
     def _loss(self, batch, **kwargs):
 
@@ -214,12 +214,12 @@ class PPO(nn.Module, _Net):
 class Actor(_FCNet):
     def __init__(self, lr=1e-3, **kwargs):
         super().__init__(activation=nn.Tanh, **kwargs)
-        self.optim = Adam(self.parameters(), lr=lr)
+        self.optim = Adam(self.parameters(), lr=lr, weight_decay=1e-5)
 
     def forward(self, *args, add_noise=True, **kwargs):
         x = super().forward(*args, **kwargs)
         if add_noise:
-            x += torch.randn(x.size()) * 0.1
+            x += torch.randn(x.size()).cuda() * 0.1  # TODO cuda
         x = torch.nn.functional.gumbel_softmax(x, hard=True)
         return x
 
@@ -230,21 +230,21 @@ class Critic(_FCNet):
         dims[0] = dims[0] + dims[-1]
         dims[-1] = 1
         super().__init__(dims=dims, **kwargs)
-        self.optim = Adam(self.parameters(), lr=lr)
+        self.optim = Adam(self.parameters(), lr=lr, weight_decay=1e-5)
 
     def forward(self, s, a):
         return super().forward(torch.cat([s, a], dim=1))
 
 
-class DDPG(_Net):
+class DDPG(nn.Module, _Net):
 
-    def __init__(self, lr_a=1e-3, lr_c=1e-3, tau=0.01, **kwargs):
+    def __init__(self, lr_a=1e-3, lr_c=1e-3, tau=0.01, n_a=115, **kwargs):
+        super().__init__()
         lr = kwargs.pop('lr') # TODO del
         self.actor = Actor(lr=lr, **kwargs)  #TODO lra, lrc
         self.critic = Critic(lr=lr, **kwargs)
+        self.n_a = n_a
 
-        self.actor_optim = Adam(self.actor.parameters(), lr=lr_a)
-        self.critic_optim = Adam(self.critic.parameters(), lr=lr_c)
 
         self.actor_t = copy.deepcopy(self.actor).eval()
         self.critic_t = copy.deepcopy(self.critic).eval()
@@ -258,10 +258,10 @@ class DDPG(_Net):
     def _loss_critic(self, batch, gamma=0.99, **kwargs):
 
         def onehot(a, n_a):
-            ret = torch.eye(n_a)[a.squeeze()]
+            ret = torch.eye(n_a)[a.squeeze()].cuda()  # TODO cuda
             return ret
 
-        q_eval = self.critic(batch.s, onehot(batch.a, 2))  # same as dqlearning  # n_a
+        q_eval = self.critic(batch.s, onehot(batch.a, self.n_a))  # same as dqlearning  # n_a
         q_next = self.critic_t(batch.s_, self.actor_t(batch.s_))
         q_target = batch.r + gamma * q_next
         return self._loss_fn(q_eval, q_target)
