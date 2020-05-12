@@ -10,9 +10,11 @@ class ReplayPool:
         self._memory = deque(maxlen=capacity)
         self.capacity = capacity
         self.T = data_type
-        self.stack = []
         self.cumulated_reward = cumulated_reward
-        self.gamma = 0.99 # TODO assign
+
+        if cumulated_reward:
+            self.stack = []
+            self.gamma = 0.99 # TODO assign
 
     def record(self, data, done):
         if not self.cumulated_reward:

@@ -14,7 +14,7 @@ import torch
 import gfootball.env as football_env
 from replay_pool import ReplayPool
 from average_meter import AverageMeter
-from model import DQN, DDQN, DuelingDQN, DuelingDDQN, PPO, DDPG
+from model import DQN, DDQN, DuelingDQN, DuelingDDQN, PPO, DDPG, TD3
 
 
 def np2flattensor(d):
@@ -70,7 +70,7 @@ def parse_args():
         args.dir = join('/tmp', args.dir)
 
     # if args.arch == 'PPO' or args.arch == 'DDPG':
-    if args.arch == 'PPO' or args.arch == 'DDPG':
+    if args.arch == 'PPO':
         args.cumulated_reward = True
     else:
         args.cumulated_reward = False  # TODO clean
@@ -78,7 +78,7 @@ def parse_args():
     args.update_per_step = args.k_epoch == 0
 
     args.gpu = not args.cpu
-    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG']
+    args.eps_greedy = args.arch in ['DQN', 'DDQN', 'DuelingDQN', 'DuelingDDQN', 'DDPG', 'TD3']
     return args
 
 
@@ -133,6 +133,7 @@ def main():
         'DuelingDDQN': DuelingDDQN,
         'PPO': PPO,
         'DDPG': DDPG,
+        'TD3': TD3,
     }
     if args.arch in ['DDPG', 'TD3']:
         model = models[args.arch](lr=args.lr, dims=[n_s, *args.hidden_size, n_a], n_a=n_a) #TODO
@@ -212,14 +213,15 @@ def main():
             s_, r, done, _ = env.step(a)
             s_ = np2flattensor(s_)
 
-            # if args.env == 'CartPole-v0' and done:
-            #     r = -1.0
+            if args.env == 'CartPole-v0' and done:
+                r = -1.0
 
             if args.arch == 'PPO':
                 pool.record(
                     [s, torch.tensor(a), torch.tensor(r), s_, logprobs], done)
             else:
                 pool.record([s, torch.tensor(a), torch.tensor(r), s_], done)
+
             s = s_
 
             if len(pool) < args.batch_size:  # TODO change to more that init steps
@@ -285,6 +287,7 @@ def main():
     save_pickle(exploit_rewards, args.dir, 'exploit.pkl')
     save_pickle(steps, args.dir, 'steps.pkl')
     save_pickle(losss, args.dir, 'losss.pkl')
+    save_pickle(losss2, args.dir, 'losss2.pkl')
     save_pickle(args, args.dir, 'args.pkl')
     rename_dir = '_'.join(args.dir.split('_')[:-1])
     rename(args.dir, f'{rename_dir}_{sum(steps)}steps_{cur_result:.2f}goal')
