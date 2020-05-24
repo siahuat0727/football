@@ -1,16 +1,17 @@
 import torch
 import random
-from collections import deque
+from collections import deque, namedtuple
 
 
 class ReplayPool:
 
-    def __init__(self, data_type, capacity=100000, cumulated_reward=False):
+    # namedtuple('Data', ['s', 'a', 'r', 's_', 'logprobs'])
+    def __init__(self, capacity=100000, cumulated_reward=False):
         self.capacity = capacity
         self._memory = deque(maxlen=capacity)
         self.capacity = capacity
-        self.T = data_type
         self.cumulated_reward = cumulated_reward
+        self._type = []
 
         if cumulated_reward:
             self.stack = []
@@ -25,21 +26,25 @@ class ReplayPool:
         if not done:
             return
 
-        total_r = None
+        prev_r = 0.0
         while self.stack:
-            data = self.stack.pop()  # (s, a, r, s_, done)
-            if total_r is None:
-                total_r = data[2]
-            else:
-                total_r = self.gamma*total_r + data[2]
-            data[2] = total_r
+            data = self.stack.pop()
+            data['r'] += self.gamma * prev_r
+            prev_r = data['r']
             self.append(data)
 
     def append(self, data):
-        self._append(self.T(*data))
+        clean_data = [
+            data[key]
+            for key in self._type
+        ]
+        self._append(self.convert(clean_data))
 
-    def clean(self):
-        self._memory = deque(maxlen=self.capacity)
+    def register(self, *it):
+        self._type.extend(it)
+
+    def convert(self, data):
+        return namedtuple('Data', self._type)(*data)
 
     def _pop(self):
         self._memory.pop()
@@ -47,14 +52,18 @@ class ReplayPool:
     def _append(self, data):
         self._memory.append(data)
 
-    def __len__(self):
-        return len(self._memory)
-
     def sample(self, batch_size):
         batch_size = min([len(self), batch_size])
         samples = random.sample(self._memory, batch_size)
-        batch = self.T(*_list2tensor(samples))
+        batch = self.convert(_list2tensor(samples))
         return batch
+
+    def clean(self):
+        self._memory = deque(maxlen=self.capacity)
+
+    def __len__(self):
+        return len(self._memory)
+
 
 
 def _list2tensor(data):

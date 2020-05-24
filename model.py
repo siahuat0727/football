@@ -1,5 +1,6 @@
 import copy
 import random
+from functools import partial
 from abc import ABC, abstractmethod
 
 import torch
@@ -26,12 +27,16 @@ def _onehot(v, n):
 
 class _MLPNet(nn.Module):
 
-    def __init__(self, in_dim, hid_dims, out_dim, activation=nn.ReLU(), **kwargs):  # TODO
+    def __init__(self, in_dim, hid_dims, out_dim, activation=nn.ReLU(), last_layer=None, **kwargs):
         super().__init__()
         self.layers = _make_layers([in_dim, *hid_dims, out_dim], activation)
+        self.last_layer = last_layer
 
     def forward(self, x):
-        return self.layers(x)
+        x = self.layers(x)
+        if self.last_layer is not None:
+            x = self.last_layer(x)
+        return x
 
 
 class _DuelingNet(nn.Module):
@@ -48,7 +53,7 @@ class _DuelingNet(nn.Module):
         mid = self.relu(self.layers(x))
         v = self.net_v(mid)
         a = self.net_a(mid)
-        return v + (a - a.mean(dim=1, keepdim=True).detach())
+        return v + (a - a.mean(dim=1, keepdim=True))
 
 
 class _Net(nn.Module, ABC):
@@ -58,7 +63,7 @@ class _Net(nn.Module, ABC):
         self.optim = Adam(self.net.parameters(), lr=lr, weight_decay=1e-4)
 
     @abstractmethod
-    def _loss(self, batch, **kwargs):
+    def _loss(self, batch, *args, **kwargs):
         pass
 
     def step(self, batch, **kwargs):
@@ -71,40 +76,58 @@ class _Net(nn.Module, ABC):
         return loss.item()
 
 
-class _QNet(_Net):
-    def __init__(self, *args, update_freq=50, **kwargs):  #TODO update
+class _DoubleNetMixin:
+    def __init__(self, *args, update_mode='hard', **kwargs):
         super().__init__(*args, **kwargs)
 
-        self._loss_fn = nn.MSELoss()
-        self.update_freq = update_freq
-
         self.n_step = 0
+        self.update_freq = kwargs.pop('update_freq')
+        assert self.update_freq > 0, f'Invalid freq {update_freq}'
+
         self.net_t = None
-        self.update_net_t()
+        self.hard_update()
 
-    def update_net_t(self):
-        self.net_t = copy.deepcopy(self.net).eval()
-        for param in self.net_t.parameters():
-            param.requires_grad = False
+        self.update = {
+            'soft': self.soft_update,
+            'hard': self.hard_update,
+        }.get(update_mode, None)
+        assert self.update is not None, f'Unknown mode {update_mode}'
 
-    def choose_act(self, s, **kwargs):
-        return self.net_t(s).squeeze().argmax(), None
+    def hard_update(self, **kwargs):
+        self.net_t = copy.deepcopy(self.net)
 
-    def _loss(self, batch, gamma=0.999):
-        q_eval = self._q_eval(batch.s, batch.a)
-        q_target = self._q_target(batch.r, batch.s_, gamma)
-        return self._loss_fn(q_eval, q_target)
+    def soft_update(self, tau=0.01, **kwargs):
+        for src, dst in zip(self.net.parameters(), self.net_t.parameters()):
+            dst.data.copy_(dst.data * (1.0 - tau) + src.data * tau)
 
     def step(self, *args, **kwargs):
         self.n_step += 1
 
         ret = super().step(*args, **kwargs)
 
-        if self.n_step % self.update_freq == 0:
-            self.update_net_t()
+        if self.n_step == self.update_freq:
+            self.update(**kwargs)
             self.n_step = 0
 
         return ret
+
+
+class _QNet(_Net):
+    def __init__(self, *args, **kwargs):  # TODO update
+        super().__init__(*args, **kwargs)
+
+        self._loss_fn = nn.MSELoss()
+
+    def choose_act(self, s, **kwargs):
+        return self.net_t(s).squeeze().argmax(), None
+
+    def _q_target(self, r, s_, gamma, **kwargs):
+        return r + gamma*self._q_next(s_, **kwargs)
+
+    def _loss(self, batch, gamma=0.999, **kwargs):
+        q_eval = self._q_eval(batch.s, batch.a, **kwargs)
+        q_target = self._q_target(batch.r, batch.s_, gamma, **kwargs)
+        return self._loss_fn(q_eval, q_target)
 
 
 class _QLearningMixin:
@@ -114,254 +137,221 @@ class _QLearningMixin:
     def _q_next(self, s_):
         return self.net_t(s_).detach().max(dim=1, keepdim=True)[0]
 
-    def _q_target(self, r, s_, gamma):
-        return r + gamma*self._q_next(s_)
-
 
 class _DQLearningMixin(_QLearningMixin):
     def _q_next(self, s_):
-        a = self.net(s_).argmax(dim=1, keepdim=True)
+        a = self.net(s_).argmax(dim=1, keepdim=True).detach()
         return self.net_t(s_).gather(1, a)
 
 
-class DQN(_QLearningMixin, _QNet):
+class DQN(_QNet, _QLearningMixin):
     def __init__(self, *args, **kwargs):
         _net = _MLPNet(*args, **kwargs)
         super().__init__(_net, *args, **kwargs)
 
 
-class DDQN(_DQLearningMixin, _QNet):
+class DDQN(_QNet, _DQLearningMixin):
     def __init__(self, *args, **kwargs):
         _net = _MLPNet(*args, **kwargs)
         super().__init__(_net, *args, **kwargs)
 
 
-class DuelingDQN(_QLearningMixin, _QNet):
+class DuelingDQN(_QNet, _QLearningMixin):
     def __init__(self, *args, **kwargs):
         _net = _DuelingNet(*args, **kwargs)
         super().__init__(_net, *args, **kwargs)
 
 
-class DuelingDDQN(_DQLearningMixin, _QNet):
+class DuelingDDQN(_QNet, _DQLearningMixin):
     def __init__(self, *args, **kwargs):
         _net = _DuelingNet(*args, **kwargs)
         super().__init__(_net, *args, **kwargs)
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, in_dim, hid_dims, out_dim, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.actor = _MLPNet(in_dim, hid_dims, out_dim, activation=nn.Tanh())
-        self.critic = _MLPNet(in_dim, hid_dims, 1, activation=nn.Tanh())
+        self.actor = _MLPNet(last_layer=nn.Softmax(dim=-1), **kwargs)
+        kwargs['out_dim'] = 1
+        self.critic = _MLPNet(**kwargs)
 
-    def _s2d(self, s, a=None):
-        return Categorical(nn.Softmax(dim=-1)(self.actor(s)))
 
-    def _a2p(self, a, dist):
+class PPO(_Net):
+    def __init__(self, reward_normalize=False, **kwargs):
+        _net = ActorCritic(activation=nn.Tanh(), **kwargs)
+        super().__init__(_net, **kwargs)
+
+        self.mse_loss = nn.MSELoss(reduction='none')
+        self.clip_eps = 0.2
+        self.reward_normalize = reward_normalize
+
+    def _s2d(self, s):
+        return Categorical((self.net.actor(s)))
+
+    def _a2prob(self, a, dist):
         a_ = a.squeeze()
         assert a_.dim() <= 1, f'size = {a.size()}'
         return dist.log_prob(a_).view(a.size())
 
-    def choose_act(self, s):
+    def choose_act(self, s, **kwargs):
         with torch.no_grad():
             dist = self._s2d(s)
         a = dist.sample()
 
-        logprobs = self._a2p(a, dist)
-        # return a, logprobs
-        return a, logprobs #TODO
+        logprobs = self._a2prob(a, dist)
+        return a, logprobs
 
     def analysis(self, s, a):
         dist = self._s2d(s)
-        logprobs = self._a2p(a, dist)
+        logprobs = self._a2prob(a, dist)
         return logprobs, dist.entropy().view(a.size())
-
-    def s2v(self, s):
-        return self.critic(s)
-
-
-class PPO(_Net):
-    def __init__(self, **kwargs):
-        net = ActorCritic(**kwargs)
-        super().__init__(net, **kwargs)
-
-        self.mse_loss = nn.MSELoss(reduction='none')
-        self.clip_eps = 0.2
 
     def _loss(self, batch, **kwargs):
 
-        logprobs, entropy = self.net.analysis(batch.s, batch.a)
-        v = self.net.s2v(batch.s)
+        r = batch.r
+        if self.reward_normalize:
+            r = (r - r.mean()) / (r.std() + 1e-20)
 
-        assert logprobs.size() == batch.logprobs.size(), f'{logprobs.size()}, {batch.logprobs.size()}'
-        ratios = torch.exp(logprobs - batch.logprobs)
+        logprobs, entropy = self.analysis(batch.s, batch.a)
+        assert logprobs.size() == batch.logprobs.size(), \
+            f'{logprobs.size()}, {batch.logprobs.size()}'
+
+        v = self.net.critic(batch.s)
 
         # advantage A(s,a) = R + yV(s') - V(s)
-        # r = (batch.r - batch.r.mean()) / batch.r.std()  # TODO normalized?
-        advs = batch.r - v.detach()
-        assert batch.r.size() == v.size() == ratios.size(), \
-            f'{v.size()} {batch.r.size()} {ratios.size()}'
+        advs = r - v.detach()
 
+        ratios = torch.exp(logprobs - batch.logprobs)
         actor_loss1 = ratios * advs
-        actor_loss2 = torch.clamp(ratios, 1-self.clip_eps, 1+self.clip_eps) * advs
+        actor_loss2 = torch.clamp(
+            ratios, 1-self.clip_eps, 1+self.clip_eps) * advs
 
-        actor_loss = torch.min(actor_loss1, actor_loss2)  # TODO better name?
-        critic_loss = 0.5 * self.mse_loss(v, batch.r)
+        actor_loss = torch.min(actor_loss1, actor_loss2)
+        critic_loss = 0.5 * self.mse_loss(v, r)
         entropy_loss = 0.001 * entropy
-
-        # print()
-        # print('---')
-        # print('a', actor_loss.mean().item())
-        # print('c', critic_loss.mean().item())
-        # print('e', entropy_loss.mean().item())
 
         loss = critic_loss - actor_loss - entropy_loss
         return loss.mean()
 
-    def choose_act(self, *args, **kwargs):
-        return self.net.choose_act(*args, **kwargs)
 
+class Actor(_DoubleNetMixin, _Net):
+    def __init__(self, discrete=True, **kwargs):
+        _net = _MLPNet(**kwargs)
+        assert kwargs['update_freq'] == 1
+        super().__init__(_net, update_mode='soft', **kwargs)
 
-class Actor(_Net):
-    def __init__(self, *args, **kwargs):
-        _net = _MLPNet(*args, activation=nn.Tanh(), **kwargs)
-        super().__init__(_net, **kwargs)
+        if discrete:
+            self.softmax = partial(
+                torch.nn.functional.gumbel_softmax, hard=True)
+        else:
+            self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, *args, add_noise=True, **kwargs):
-        x = self.net(*args, **kwargs)
+    def forward(self, *args, add_noise=False, use_target=False, **kwargs):
+        net = self.net_t if use_target else self.net
+        x = net(*args, **kwargs)
+
         if add_noise:
-            x += torch.randn(x.size()).to(x.device) * 0.1  # TODO cuda
-        x = torch.nn.functional.gumbel_softmax(x, hard=True)
-        return x
+            x += (torch.randn(x.size()).to(x.device) * 0.1).clamp(-1, 1)
 
-    def _loss(self):
-        pass
+        return self.softmax(x)
+
+    def _loss(self, batch, critic=None, **kwargs):
+        act_logits = self.forward(batch.s, add_noise=True)
+
+        # TODO regularize?+ 1e-3*(act_logits**2).mean()  #TODO l2norm
+        loss = -critic(batch.s, act_logits).mean()
+        return loss
 
 
-class Critic(_Net):
+class Critic(_DoubleNetMixin, _QNet):
     def __init__(self, **kwargs):
-        in_dim = kwargs.pop('in_dim') + kwargs.pop('out_dim')
-        _net = _MLPNet(in_dim=in_dim, out_dim=1, activation=nn.Tanh(), **kwargs)
-        super().__init__(_net, **kwargs)
+        _net = _MLPNet(**kwargs)
+        assert kwargs['update_freq'] == 1
+        super().__init__(_net, update_mode='soft', **kwargs)
+        self.n_a = kwargs['n_a']
 
-    def forward(self, s, a):
-        return self.net(torch.cat([s, a], dim=1))
+    def forward(self, s, a=None, use_target=False):
+        if a is None:
+            input_ = s
+        else:
+            input_ = torch.cat([s, a], dim=1)
+        net = self.net_t if use_target else self.net
+        return net(input_)
 
-    def _loss(self):
-        pass
+    def _q_eval(self, s, a, **kwargs):
+        return self.forward(s, _onehot(a, self.n_a))
+
+    def _q_next(self, s_, actor=None, **kwargs):
+        return self.forward(s_, actor(s_, use_target=True), use_target=True).detach()
 
 
 class DDPG(nn.Module):
 
-    def __init__(self, *args, tau=0.01, **kwargs):
+    def __init__(self, *args, tau=0.01, activation=nn.Tanh(), critic=Critic, **kwargs):
         super().__init__()
 
-        self.n_a = kwargs.get('out_dim')
-        self.actor = Actor(*args, **kwargs)  #TODO lra, lrc
-        self.critic = Critic(*args, **kwargs)
-
-        self.actor_t = copy.deepcopy(self.actor).eval()
-        self.critic_t = copy.deepcopy(self.critic).eval()
         self.tau = tau
-        self._loss_fn = nn.MSELoss()  #TODO duplicate
+        kwargs['activation'] = activation
+        self.actor = Actor(*args, **kwargs)  # TODO lra, lrc
+
+        n_a = kwargs.get('out_dim')
+        kwargs['in_dim'] += kwargs['out_dim']
+        kwargs['out_dim'] = 1
+        self.critic = critic(*args, n_a=n_a, **kwargs)
 
     def choose_act(self, s, add_noise=True):
-        return self.actor_t(s, add_noise=add_noise).argmax(), None
-
-    def _loss_critic(self, batch, gamma=0.99, **kwargs):
-
-        q_eval = self.critic(batch.s, _onehot(batch.a, self.n_a))  # same as dqlearning  # n_a
-        q_next = self.critic_t(batch.s_, self.actor_t(batch.s_))
-        assert q_eval.size() == q_next.size(), f'{q_eval.size()}, {q_next.size()}'
-        assert q_eval.size() == batch.r.size(), f'{q_eval.size()}, {batch.r.size()}'
-        q_target = batch.r + gamma * q_next.detach()
-        return self._loss_fn(q_eval, q_target)
-
-    def _loss_actor(self, batch, **kwargs):
-        act_logits = self.actor(batch.s)
-
-        loss = -self.critic(batch.s, act_logits).mean() #TODO regularize?+ 1e-3*(act_logits**2).mean()  #TODO l2norm
-        return loss
+        return self.actor(s, add_noise=add_noise, use_target=True).argmax(), None
 
     def _loss(self):
-        print('Please implement')
-        pass
-
-    def soft_update(self):
-        def do_soft_update(src_net, dst_net, tau):
-            for src, dst in zip(src_net.parameters(), dst_net.parameters()):
-                dst.data.copy_(dst.data * (1.0 - tau) + src.data * tau)
-        do_soft_update(self.actor, self.actor_t, self.tau)
-        do_soft_update(self.critic, self.critic_t, self.tau)
-
+        raise NotImplemented
 
     def step(self, batch, **kwargs):
-        critic_loss = self._loss_critic(batch, **kwargs)
-        self.critic.optim.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-        self.critic.optim.step()
+        critic_loss = self.critic.step(batch, actor=self.actor, tau=self.tau)
+        actor_loss = self.actor.step(batch, critic=self.critic, tau=self.tau)
 
-        actor_loss = self._loss_actor(batch)
-        self.actor.optim.zero_grad()
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-        self.actor.optim.step()
-
-        self.soft_update()
-        return critic_loss.item(), actor_loss.item()
+        return critic_loss, actor_loss
 
 
-class Critic2(nn.Module):
+class DoubleCritic:
     def __init__(self, *args, **kwargs):
-        super().__init__()
         self.net1 = Critic(*args, **kwargs)
         self.net2 = Critic(*args, **kwargs)
 
-    def forward(self, s, a):
-        return self.net1(s, a), self.net2(s, a)
+        self._q_next1, self.net1._q_next = self.net1._q_next, self._min_q_next
+        self._q_next2, self.net2._q_next = self.net2._q_next, self._min_q_next
+        self._q_next_cache = None
+
+    def _min_q_next(self, *args, **kwargs):
+        if self._q_next_cache is not None:
+            return self._q_next_cache
+        self._q_next_cache = torch.min(*[
+            fn(*args, **kwargs)
+            for fn in [self._q_next1, self._q_next2]
+        ])
+        return self._q_next_cache
+
+    def step(self, *args, **kwargs):
+        self._q_next_cache = None
+        loss1 = self.net1.step(*args, **kwargs)
+        loss2 = self.net2.step(*args, **kwargs)
+        return loss1 + loss2
 
 
 class TD3(DDPG):
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.critic = Critic2(*args, **kwargs)
-        self.critic_t = copy.deepcopy(self.critic).eval()
+        super().__init__(*args, critic=DoubleCritic, **kwargs)
         self.n_step = 0
-
-    def _loss_critic(self, batch, gamma=0.99, **kwargs):
-
-        q_eval1, q_eval2 = self.critic(batch.s, _onehot(batch.a, self.n_a))
-        q_next1, q_next2 = self.critic_t(batch.s_, self.actor_t(batch.s_))
-
-        q_target = batch.r + gamma * torch.min(q_next1, q_next2).detach()
-        return self._loss_fn(q_eval1, q_target) + self._loss_fn(q_eval2, q_target)
-
-    def _loss_actor(self, batch, **kwargs):
-        act_logits = self.actor(batch.s)
-
-        loss = -self.critic.net1(batch.s, act_logits).mean() #TODO regularize?+ 1e-3*(act_logits**2).mean()  #TODO l2norm
-        return loss
 
     def step(self, batch, **kwargs):
         self.n_step += 1
-        critic_loss = self._loss_critic(batch, **kwargs)
-        self.critic.net1.optim.zero_grad()
-        self.critic.net2.optim.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-        self.critic.net1.optim.step()
-        self.critic.net2.optim.step()
 
-        if self.n_step % 5 == 0:  #TODO
-            actor_loss = self._loss_actor(batch)
-            self.actor.optim.zero_grad()
-            actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-            self.actor.optim.step()
-        else:
-            actor_loss = torch.tensor(0)
+        critic_loss = self.critic.step(batch, actor=self.actor, tau=self.tau)
 
-        self.soft_update()
-        return critic_loss.item(), actor_loss.item()
+        actor_loss = 0.0
+        if self.n_step == 5:
+            self.n_step = 0
+            actor_loss = self.actor.step(
+                batch, critic=self.critic.net1, tau=self.tau)
+
+        return critic_loss, actor_loss
